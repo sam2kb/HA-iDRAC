@@ -1,4 +1,4 @@
-# HA-iDRAC/ha-idrac-controller-dev/app/fan_logic.py
+# HA-iDRAC/ha-idrac-controller-legacy/app/fan_logic.py
 """Small, testable fan-control helpers.
 
 Kept separate from main.py so the threshold/hysteresis behaviour can be unit
@@ -51,44 +51,3 @@ class SimpleFanState:
         if self.bucket == "high":
             return clamp_speed(high_speed)
         return clamp_speed(base_speed)
-
-
-def _int_or(value, default):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def validate_fan_config(low_temp_c, critical_temp_c, base_speed, high_speed):
-    """Return safe, self-consistent fan settings plus warnings to log.
-
-    Nonsensical settings (critical <= low, high < base) are corrected rather
-    than silently producing a fan profile that never uses one of its tiers.
-    """
-    warnings = []
-    low = _int_or(low_temp_c, 45)
-    critical = _int_or(critical_temp_c, 65)
-    base = clamp_speed(base_speed)
-    high = clamp_speed(high_speed)
-
-    if critical <= low:
-        critical = low + 1
-        warnings.append(
-            f"critical_temp_threshold ({critical_temp_c}) must be above "
-            f"low_temp_threshold ({low_temp_c}); using {critical} C instead."
-        )
-    if high < base:
-        high = base
-        warnings.append(
-            f"high_temp_fan_speed_percent ({high_speed}) must be at least "
-            f"base_fan_speed_percent ({base_speed}); using {high}% instead."
-        )
-
-    return {
-        "low": low,
-        "critical": critical,
-        "base": base,
-        "high": high,
-        "warnings": warnings,
-    }

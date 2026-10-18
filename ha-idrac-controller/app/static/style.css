@@ -180,10 +180,10 @@ ul.flashes li.warning {
 
 
 /* --- Fan Curve Point Styling --- */
-.fan-point { 
-    margin-bottom: 15px; 
-    padding: 15px; 
-    border: 1px solid var(--divider-color, var(--fallback-divider-dark)); 
+.fan-point {
+    margin-bottom: 15px;
+    padding: 15px;
+    border: 1px solid var(--divider-color, var(--fallback-divider-dark));
     background-color: var(--secondary-background-color, var(--fallback-dark-bg)); /* Ensure this contrasts with text */
     border-radius: var(--ha-card-border-radius, 12px);
     display: flex;
@@ -191,31 +191,31 @@ ul.flashes li.warning {
     align-items: center;
     gap: 10px;
 }
-.fan-point label { 
+.fan-point label {
     color: var(--secondary-text-color, var(--primary-text-color)); /* Labels within fan-point */
-    margin-bottom: 0; 
+    margin-bottom: 0;
     flex-shrink: 0;
 }
-.fan-point input[type="number"] { 
-    width: 80px; 
-    padding: 8px; 
+.fan-point input[type="number"] {
+    width: 80px;
+    padding: 8px;
     margin-right: 10px;
     margin-bottom: 0;
     /* Ensure input text/bg here also use theme variables, inherited from above */
 }
 .fan-point button { /* Remove button */
     background-color: var(--error-color, #dc3545);
-    font-size: 0.9em; 
+    font-size: 0.9em;
     padding: 6px 10px;
     margin-left: auto;
 }
-.fan-point button:hover { 
+.fan-point button:hover {
     filter: brightness(90%);
     background-color: var(--error-color, #dc3545);
 }
 
 /* Button to add fan curve points */
-button.add-point { 
+button.add-point {
     background-color: var(--success-color, #28a745); /* Use a more distinct class if needed */
 }
 button.add-point:hover {

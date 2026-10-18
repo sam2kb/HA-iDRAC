@@ -1,7 +1,7 @@
 """Threshold/hysteresis tests for the 3-tier fan control."""
 from conftest import load_module
 
-fan_logic = load_module("dev_fan_logic", "ha-idrac-controller-dev/app/fan_logic.py")
+fan_logic = load_module("main_fan_logic", "ha-idrac-controller/app/fan_logic.py")
 
 
 def test_simple_mode_uses_base_below_low_threshold():
