@@ -1,8 +1,10 @@
 # Home Assistant iDRAC Controller Add-on (Development Version)
 
-**<font color="red">⚠️ DEVELOPMENT VERSION - USE WITH CAUTION! ⚠️</font>**
+> Development version. Use with caution.
 
-**This is a work-in-progress, development version of the HA iDRAC Controller add-on. It is intended for testing and feedback. Unexpected behavior or bugs are possible. Use this version at your own risk, as incorrect fan configuration could potentially lead to server overheating if not carefully monitored.**
+This is a work-in-progress build for testing and feedback. Bugs are possible.
+Incorrect fan settings can overheat a server, so watch the temperatures after
+enabling fan control.
 
 ---
 
@@ -17,12 +19,12 @@ This add-on connects to your servers' iDRAC interfaces using IPMI to:
 
 ## Features
 
-* **Multi-Server Support:** Monitor and control all your Dell PowerEdge servers from a single add-on instance.
-* **Advanced Fan Control:** Choose your preferred fan management mode on a per-server basis:
-    * **Simple Thresholds:** A 3-tier system (Base, High, Critical) for straightforward fan management.
-    * **Multi-Point Curve:** Define a custom temperature-to-fan-speed curve for smooth and granular control.
-    * **Target Temperature:** Set a desired CPU temperature, and the add-on will automatically adjust fan speeds to maintain it.
-* **Comprehensive Server Monitoring:** Creates a dedicated device in Home Assistant for each server with sensors for:
+* Multi-Server Support: Monitor and control all your Dell PowerEdge servers from a single add-on instance.
+* Advanced Fan Control: Choose your preferred fan management mode on a per-server basis:
+    * Simple Thresholds: A 3-tier system (Base, High, Critical) for straightforward fan management.
+    * Multi-Point Curve: Define a custom temperature-to-fan-speed curve for smooth and granular control.
+    * Target Temperature: Set a desired CPU temperature, and the add-on will automatically adjust fan speeds to maintain it.
+* Comprehensive Server Monitoring: Creates a dedicated device in Home Assistant for each server with sensors for:
     * Individual CPU Temperatures
     * Hottest CPU Temperature
     * Inlet & Exhaust Temperatures
@@ -31,38 +33,35 @@ This add-on connects to your servers' iDRAC interfaces using IPMI to:
     * Target Fan Speed Percentage
     * PSU Status (OK/Problem)
     * Server Connectivity (Online/Offline)
-* **Remote Actions:**
-    * **Graceful Shutdown:** A "Shutdown Server" button is created for each server in Home Assistant.
-* **Web UI via Ingress:**
+* Remote Actions:
+    * Graceful Shutdown: A "Shutdown Server" button is created for each server in Home Assistant.
+* Web UI via Ingress:
     * View a live dashboard of all monitored servers.
     * A dedicated "Manage Servers" page to add, edit, and delete servers and configure their fan control settings.
-* **MQTT Auto-Discovery:** Automatically creates and configures all entities in Home Assistant.
+* MQTT Auto-Discovery: Automatically creates and configures all entities in Home Assistant.
 
-## Changes in this fork (0.1.0-dev.15)
+## Changes in this fork (0.2.0)
 
-* CPU temperature parsing uses the IPMI processor entity (`3.x`), so both
-  `CPU1 Temp` (13G/iDRAC 8) and `Temp` (12G/iDRAC 7) are found.
-* Inlet/exhaust matching is anchored to the start of the sensor name, so
-  `PSU1 Inlet Temp` cannot replace the chassis inlet reading.
-* 2 °C hysteresis on the base/high and critical thresholds; speeds below 5 %
-  are clamped to 5 %.
-* If the manual-mode command lands but the speed command fails, the fans are
-  handed back to Dell auto instead of being pinned at the previous speed.
-* A server that refuses fan control (0xc1/0xd4/0xd5 — iDRAC 9/10 or an account
-  below Administrator) is detected once, fan control is disabled and
-  monitoring continues.
-* Optional per-server **Third-party PCIe cooling** setting (12G/13G OEM
-  command); restored on shutdown.
-* MQTT device gets `sw_version` (iDRAC firmware) and `serial_number` (service
-  tag) from the server.
-* Contradictory thresholds are corrected with a warning; implausible
-  temperatures outside -20..125 °C are ignored.
-* MQTT outages no longer stop a worker; passwords are passed with `ipmitool -E`;
-  the Supervisor watchdog is enabled.
+CPU temperature parsing uses the IPMI processor entity (`3.x`), so both
+`CPU1 Temp` on 13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 are found. Inlet and
+exhaust names are anchored, so `PSU1 Inlet Temp` cannot replace the chassis
+inlet reading.
+
+Fan control has a 2 °C hysteresis band, a 5% floor, and a hand-back to Dell
+auto when a speed write fails. A server that refuses fan control with
+0xc1/0xd4/0xd5 (iDRAC 9 or 10, or an account below Administrator) is detected
+once; fan control is disabled and monitoring continues. An optional per-server
+third-party PCIe cooling setting sends the 12G/13G OEM command and restores
+Dell's setting on shutdown.
+
+MQTT outages no longer stop a worker, passwords go through `ipmitool -E`, and
+the Supervisor watchdog is enabled. The MQTT device receives `sw_version` and
+`serial_number` from the server, contradictory thresholds are corrected with a
+warning, and temperatures outside -20 to 125 °C are ignored.
 
 ---
 
-## <font color="orange">⚠️ Important Note for Testers ⚠️</font>
+## Important note for testers
 * This version is for active development. Please report any issues or bugs you encounter.
 * **Closely monitor your server's temperatures after configuring and enabling fan control.**
 * The developer is not responsible for any damage arising from the use of this development software.
@@ -116,15 +115,15 @@ Configuration is now handled almost entirely through the add-on's Web UI.
 ## Web UI (Ingress Panel)
 
 The Web UI is the primary interface for this add-on:
-* **Dashboard:** Shows a live status overview for every enabled server. The page auto-refreshes.
-* **Manage Servers Page:** Allows you to add, edit, or delete your server configurations. When editing a server, you can select the desired fan control mode and configure its specific parameters.
+* Dashboard: Shows a live status overview for every enabled server. The page auto-refreshes.
+* Manage Servers Page: Allows you to add, edit, or delete your server configurations. When editing a server, you can select the desired fan control mode and configure its specific parameters.
 
 ## Entities Created in Home Assistant
 
 For each server, the add-on will create a new device in Home Assistant with the following entities:
-* **Controls:**
+* Controls:
     * `button.idrac_server_alias_shutdown_server`
-* **Sensors:**
+* Sensors:
     * `binary_sensor.idrac_server_alias_status` (Online/Offline)
     * `binary_sensor.idrac_server_alias_psu_status` for each power supply.
     * Numerous sensors for temperatures, fan speeds, and power usage.
@@ -133,10 +132,10 @@ For each server, the add-on will create a new device in Home Assistant with the 
 
 ## Troubleshooting
 
-* **Check the Add-on Log:** The first place to look for errors is the "Log" tab of the add-on. Set the "Log Level" to `debug` or `trace` in the Configuration tab for more detail.
-* **IPMI Errors:** Verify "IPMI over LAN" is enabled and that all credentials are correct for each server in the Web UI.
-* **MQTT Errors:** Check your MQTT credentials in the add-on's Configuration tab.
-* **Incorrect Sensor Data:** The regex patterns for parsing sensor data in `app/ipmi_manager.py` may need to be adjusted for your specific server model if you see incorrect or missing values.
+* Check the Add-on Log: The first place to look for errors is the "Log" tab of the add-on. Set the "Log Level" to `debug` or `trace` in the Configuration tab for more detail.
+* IPMI Errors: Verify "IPMI over LAN" is enabled and that all credentials are correct for each server in the Web UI.
+* MQTT Errors: Check your MQTT credentials in the add-on's Configuration tab.
+* Incorrect Sensor Data: The regex patterns for parsing sensor data in `app/ipmi_manager.py` may need to be adjusted for your specific server model if you see incorrect or missing values.
 
 ## Contributing / Reporting Issues
 

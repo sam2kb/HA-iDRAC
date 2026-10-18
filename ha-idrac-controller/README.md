@@ -12,8 +12,8 @@ This add-on connects to your server's iDRAC interface using IPMI to:
 
 ## Features
 
-* **Dynamic Fan Control:** Adjusts fan speeds based on the hottest CPU core temperature using a 3-tier threshold system (Base, High, Critical).
-* **Server Monitoring:** Creates Home Assistant sensors for:
+* Dynamic Fan Control: Adjusts fan speeds based on the hottest CPU core temperature using a 3-tier threshold system (Base, High, Critical).
+* Server Monitoring: Creates Home Assistant sensors for:
     * Individual CPU Temperatures
     * Hottest CPU Temperature
     * Inlet Temperature
@@ -22,34 +22,35 @@ This add-on connects to your server's iDRAC interface using IPMI to:
     * Power Consumption (Watts)
     * Target Fan Speed Percentage
     * Add-on Connectivity Status
-* **MQTT Auto-Discovery:** Automatically creates and configures entities in Home Assistant.
-* **Web UI via Ingress:**
+* MQTT Auto-Discovery: Automatically creates and configures entities in Home Assistant.
+* Web UI via Ingress:
     * View live server status (temperatures, fan speeds, power).
     * View current fan control settings.
     * (Future/Optional) Configure an advanced multi-point fan curve.
-* **Configurable:** Set iDRAC credentials, fan thresholds, temperature units, and MQTT details via the Home Assistant add-on configuration panel.
+* Configurable: Set iDRAC credentials, fan thresholds, temperature units, and MQTT details via the Home Assistant add-on configuration panel.
 
-## Changes in this fork (0.1.4)
+## Changes in this fork (0.2.0)
 
-* CPU temperatures are also found on 13G servers (`CPU1 Temp`/`CPU2 Temp`) —
-  without this the add-on fell back to Dell auto on every cycle and never
-  controlled the fans on a T430/R730.
-* 2 °C hysteresis around the low and critical thresholds.
-* Fan speeds below 5 % are clamped to 5 %.
-* The iDRAC password is passed with `ipmitool -E`/`IPMI_PASSWORD` instead of
-  appearing in the process list.
-* Watchdog enabled so Supervisor restarts the add-on if it exits.
-* Inlet/exhaust sensors are matched at the start of the name, so a
-  `PSU1 Inlet Temp` reading cannot replace the chassis inlet.
-* A refused fan command (0xc1/0xd4/0xd5) is detected once and monitoring
-  continues; a failed speed write hands the fans back to Dell auto.
-* Contradictory thresholds are corrected with a warning.
+CPU temperatures are also found on 13G servers (`CPU1 Temp`/`CPU2 Temp`).
+Without that, the add-on fell back to Dell auto on every cycle and never
+controlled the fans on a T430 or R730.
+
+Fan control has a 2 °C hysteresis band and a 5% floor. If a speed write fails
+after manual mode was enabled, the fans go back to Dell auto. A server that
+refuses fan control with 0xc1/0xd4/0xd5 is detected once and monitoring
+continues.
+
+The iDRAC password is passed with `ipmitool -E` and `IPMI_PASSWORD` instead of
+appearing in the process list. The Supervisor watchdog restarts the add-on if
+it exits. Inlet and exhaust names are anchored so a `PSU1 Inlet Temp` reading
+cannot replace the chassis inlet, and contradictory thresholds are corrected
+with a warning.
 
 ---
 
 ## Prerequisites
 
-1.  **Dell PowerEdge Server with iDRAC 7 or 8:** This add-on uses IPMI. Both the 12th-generation sensor naming (`Temp`, iDRAC 7) and the 13th-generation naming (`CPU1 Temp`/`CPU2 Temp`, iDRAC 8 — e.g. **T430**, R630, R730) are supported. The original code was hardware-tested on an R720; the 13G pattern is covered by unit tests but not yet verified on a physical T430.
+1.  **Dell PowerEdge Server with iDRAC 7 or 8:** This add-on uses IPMI. Both the 12th-generation sensor naming (`Temp`, iDRAC 7) and the 13th-generation naming (`CPU1 Temp`/`CPU2 Temp`, iDRAC 8, for example T430, R630 and R730) are supported. The original code was hardware-tested on an R720; the 13G pattern is covered by unit tests but not yet verified on a physical T430.
 2.  **Network Connectivity:** Your Home Assistant instance must be able to reach your server's iDRAC IP address over the network.
 3.  **IPMI over LAN Enabled in iDRAC:** This is crucial.
 
@@ -57,17 +58,17 @@ This add-on connects to your server's iDRAC interface using IPMI to:
 
     The exact steps can vary slightly depending on your iDRAC version (iDRAC7, iDRAC8, iDRAC9, etc.).
 
-    * **Access iDRAC Web Interface:** Open a web browser and navigate to your iDRAC's IP address. Log in with your iDRAC credentials.
-    * **Navigate to Network Settings:**
-        * **iDRAC 7/8:** Look for "iDRAC Settings" -> "Network" or "Connectivity".
-        * **iDRAC 9:** Look for "iDRAC Settings" -> "Connectivity" -> "Network Settings".
-    * **Find IPMI Settings:** Within the network settings, look for a section specifically labeled "IPMI Settings" or "IPMI over LAN."
+    * Access iDRAC Web Interface: Open a web browser and navigate to your iDRAC's IP address. Log in with your iDRAC credentials.
+    * Navigate to Network Settings:
+        * iDRAC 7/8: Look for "iDRAC Settings" -> "Network" or "Connectivity".
+        * iDRAC 9: Look for "iDRAC Settings" -> "Connectivity" -> "Network Settings".
+    * Find IPMI Settings: Within the network settings, look for a section specifically labeled "IPMI Settings" or "IPMI over LAN."
         * Common path: (iDRAC Settings -> Network -> IPMI Settings link at the top or bottom of the page).
-    * **Enable IPMI over LAN:**
+    * Enable IPMI over LAN:
         * There will be a checkbox or toggle: "Enable IPMI Over LAN". Ensure this is **checked/enabled**.
-        * **Channel Privilege Level Limit:** Set this to "ADMINISTRATOR" or "OPERATOR" to allow fan control and sensor reading. Administrator is usually required for control.
-        * **Encryption Key:** Leave as `0000000000000000000000000000000000000000` (40 zeros) unless you have specific IPMI 2.0 encryption needs (this add-on uses standard IPMItool commands that work with this default).
-    * **Apply Settings:** Save and apply the changes. The iDRAC might restart its network interface.
+        * Channel Privilege Level Limit: Set this to "ADMINISTRATOR" or "OPERATOR" to allow fan control and sensor reading. Administrator is usually required for control.
+        * Encryption Key: Leave as `0000000000000000000000000000000000000000` (40 zeros) unless you have specific IPMI 2.0 encryption needs (this add-on uses standard IPMItool commands that work with this default).
+    * Apply Settings: Save and apply the changes. The iDRAC might restart its network interface.
 
     *If you cannot find these settings, consult your specific Dell PowerEdge server's iDRAC manual for "IPMI over LAN" configuration.*
 
@@ -99,20 +100,20 @@ After installation, you **must** configure the add-on before starting it.
 2.  Switch to the **"Configuration"** tab.
 3.  Fill in the following options:
 
-    * **iDRAC Connection:**
+    * iDRAC Connection:
         * `idrac_ip`: (Required) The IP address or hostname of your server's iDRAC.
         * `idrac_username`: (Required) Your iDRAC username (default: `root`).
         * `idrac_password`: (Required) Your iDRAC password.
-    * **Fan Control Logic (Simple Mode):**
+    * Fan Control Logic (Simple Mode):
         * `temperature_unit`: `C` (Celsius) or `F` (Fahrenheit). Temperatures from iDRAC are read in Celsius; if you set this to 'F', the thresholds you enter are assumed to be in Fahrenheit and converted internally. The dashboard and MQTT sensors always report °C.
         * `base_fan_speed_percent`: (Default: `20`) The fan speed (0-100%) to use when the hottest CPU core is below the `low_temp_threshold`.
         * `low_temp_threshold`: (Default: `45`) The CPU temperature (in your selected `temperature_unit`) above which fans will switch from `base_fan_speed_percent` to `high_temp_fan_speed_percent`.
         * `high_temp_fan_speed_percent`: (Default: `50`) The fan speed (0-100%) to use when the hottest CPU core is at or above `low_temp_threshold` but below `critical_temp_threshold`.
         * `critical_temp_threshold`: (Default: `65`) The CPU temperature (in your selected `temperature_unit`) at or above which fan control will be handed back to the iDRAC (Dell's automatic mode) for safety.
-    * **Polling and Logging:**
+    * Polling and Logging:
         * `check_interval_seconds`: (Default: `30`) How often (in seconds) to check temperatures and adjust fans.
         * `log_level`: (Default: `info`) Set the verbosity of logs. Options: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `fatal`. Use `debug` or `trace` for troubleshooting.
-    * **MQTT Configuration:**
+    * MQTT Configuration:
         * `mqtt_host`: (Default: `core-mosquitto`) Hostname or IP address of your MQTT broker.
         * `mqtt_port`: (Default: `1883`) Port for your MQTT broker.
         * `mqtt_username`: (Optional) Username for MQTT broker authentication. Leave blank for anonymous access if your broker allows it (common for `core-mosquitto` from other add-ons).
@@ -137,36 +138,36 @@ The Web UI currently provides:
 
 If MQTT is configured correctly, the following entities will be automatically discovered and created under a device representing your iDRAC:
 
-* **Connectivity:**
+* Connectivity:
     * `binary_sensor.idrac_controller_connectivity`: `online`/`offline` status of the add-on.
-* **Temperatures (°C):**
+* Temperatures (°C):
     * `sensor.idrac_cpu_0_temperature` (and `_1`, `_2`, `_3` etc., based on detected CPUs)
     * `sensor.idrac_hottest_cpu_temp`
     * `sensor.idrac_inlet_temperature`
     * `sensor.idrac_exhaust_temperature`
-* **Fans:**
+* Fans:
     * `sensor.idrac_target_fan_speed`: Current target fan speed percentage (or "Auto").
     * `sensor.idrac_fan_X_rpm`: Actual speed for each detected fan (e.g., `sensor.idrac_fan_fan1a_tach_rpm`).
-* **Power:**
+* Power:
     * `sensor.idrac_power_consumption`: Current server power usage in Watts.
 
 *(Sensor entity IDs might vary slightly based on your iDRAC IP and sensor names).*
 
 ## Troubleshooting
 
-* **No Output in Add-on Log:** If the add-on starts but the log is empty after `legacy-services successfully started`, there might be a fundamental issue with the s6-overlay execution or output redirection in the base image. This was an earlier debugging step; the current version using `python:3.11-slim-bookworm` should show logs.
-* **"Manifest Unknown" or Docker Build Errors:** Ensure your Home Assistant OS and Supervisor are up to date. If issues persist with pulling base images, check your HA host's network and DNS settings. Sometimes specific tags for HA base images can be problematic; using standard Docker Hub images like `python:3.11-slim-bookworm` (as currently configured) is often more stable.
-* **IPMI Communication Errors:**
+* No Output in Add-on Log: If the add-on starts but the log is empty after `legacy-services successfully started`, there might be a fundamental issue with the s6-overlay execution or output redirection in the base image. This was an earlier debugging step; the current version using `python:3.11-slim-bookworm` should show logs.
+* "Manifest Unknown" or Docker Build Errors: Ensure your Home Assistant OS and Supervisor are up to date. If issues persist with pulling base images, check your HA host's network and DNS settings. Sometimes specific tags for HA base images can be problematic; using standard Docker Hub images like `python:3.11-slim-bookworm` (as currently configured) is often more stable.
+* IPMI Communication Errors:
     * Verify "IPMI over LAN" is enabled in your iDRAC settings (see Prerequisites).
     * Double-check the iDRAC IP, username, and password in the add-on configuration.
     * Ensure no firewall is blocking UDP port 623 (standard IPMI port) between Home Assistant and your iDRAC.
-* **MQTT "Not Authorized" Errors:**
+* MQTT "Not Authorized" Errors:
     * Ensure the MQTT username and password configured in the add-on match a valid user in your MQTT broker (e.g., Mosquitto).
     * If using the `core-mosquitto` add-on, you may need to create a new Home Assistant user and configure Mosquitto to use HA users for authentication, then use those credentials in this add-on.
-* **Incorrect Temperature/Fan Parsing:**
+* Incorrect Temperature/Fan Parsing:
     * The add-on tries to parse sensor data from `ipmitool`. If values are incorrect or missing, the regex patterns in `app/ipmi_manager.py` or `app/main.py` might need adjustment for your specific server model or iDRAC firmware version's output.
     * Set Log Level to `debug` or `trace` in the add-on configuration to see detailed parsing attempts.
-* **To get detailed logs:** Set the `log_level` to `debug` or `trace` in the add-on's Configuration tab and restart the add-on. View logs in the "Log" tab.
+* To get detailed logs: Set the `log_level` to `debug` or `trace` in the add-on's Configuration tab and restart the add-on. View logs in the "Log" tab.
 
 ## Contributing / Reporting Issues
 
