@@ -1,3 +1,14 @@
+## 0.3.0 - 2026-10-18
+
+- Promoted the multi-server build to the main add-on: name "HA iDRAC
+  Controller", slug `ha_idrac_controller`, version 0.3.0.
+- Renamed the original single-server build to "HA iDRAC Controller (Legacy)",
+  slug `ha_idrac_controller_legacy`, version 0.2.1.
+- No functional changes to either add-on. If you installed the 0.2.0 BETA
+  (`ha_idrac_controller_development`), remove it and install the main add-on.
+  Its `/data` volume is tied to the old slug, so the server list does not carry
+  over.
+
 ## 0.2.0 - 2026-10-18
 
 First tagged release of the fork. It covers iDRAC 8 (13G) support and the

@@ -1,388 +1,417 @@
 # HA-iDRAC/ha-idrac-controller/app/main.py
+import json
 import os
-import time
-import sys
+import re
 import signal
 import threading
-import re
-import json
+import time
 
-from . import ipmi_manager
+from .fan_logic import SimpleFanState, clamp_speed, validate_fan_config
+from .ipmi_manager import IPMIManager
+from .mqtt_client import MqttClient
+from .pid_controller import PIDController
 from . import web_server
-from . import mqtt_client
-from .fan_logic import SimpleFanState
 
 # --- Global Variables ---
 running = True
-addon_options = {}
-server_info = {
-    "manufacturer": "Unknown", "model": "Unknown", "is_gen14_plus": False,
-    "cpu_generic_temp_pattern": None,
-    "inlet_temp_name_pattern": None,
-    "exhaust_temp_name_pattern": None
-}
-app_config = {}
-loop_count = 0
-fan_state = SimpleFanState()
-current_parsed_status = { # For sharing with web_server via file
-    "cpu_temps_c": [], "hottest_cpu_temp_c": "N/A",
-    "inlet_temp_c": "N/A", "exhaust_temp_c": "N/A",
-    "target_fan_speed_percent": "N/A", "actual_fan_rpms": [],
-    "last_updated": "Never"
-}
+threads = []
+status_lock = threading.Lock()
+ALL_SERVERS_STATUS = {}
 STATUS_FILE = "/data/current_status.json"
+PID_STATE_FILE = "/data/pid_states.json"
 
-# MQTT Discovery Tracking
-# Use sets to store unique identifiers (slugs) of sensors for which discovery has been published
-discovered_cpu_sensors = set()
-discovered_fan_rpm_sensors = set()
-static_sensors_discovered = False # For Inlet, Exhaust, Target Fan Speed
 
-# --- Graceful Shutdown & Helpers ---
+# --- Graceful Shutdown ---
 def graceful_shutdown(signum, frame):
     global running
     print("[MAIN] Shutdown signal received. Cleaning up...", flush=True)
     running = False
 
+
 signal.signal(signal.SIGTERM, graceful_shutdown)
 signal.signal(signal.SIGINT, graceful_shutdown)
 
-def determine_server_generation(model_name):
-    if not model_name: return False
-    match = re.search(r"\b[RT]\s?(\d)(\d)\d\b", model_name.upper())
-    if match:
+
+# --- Server Worker Class ---
+class ServerWorker:
+    def __init__(self, server_config, global_opts):
+        self.config = server_config
+        self.global_opts = global_opts
+        self.alias = self.config['alias']
+        self.log_level = self.global_opts['log_level']
+        self.running = True
+
+        self.ipmi = IPMIManager(
+            ip=self.config['idrac_ip'],
+            user=self.config['idrac_username'],
+            password=self.config['idrac_password'],
+            log_level=self.log_level,
+        )
+        self.mqtt = MqttClient(client_id=f"ha_idrac_{self.alias}")
+        self.pid = PIDController()
+        self.fan_state = SimpleFanState()
+
+        self.server_info = {}
+        self.discovered_sensors = set()
+        self._next_mqtt_attempt = 0.0
+        self._pcie_response_disabled = False
+        self.alive = True
+        self.fan_cfg = validate_fan_config(
+            self.config.get('low_temp_threshold', 45),
+            self.config.get('critical_temp_threshold', 65),
+            self.config.get('base_fan_speed_percent', 20),
+            self.config.get('high_temp_fan_speed_percent', 50),
+        )
+
+    def _log(self, level, message):
+        print(f"[{level.upper()}] [{self.alias}] {message}", flush=True)
+
+    def _on_mqtt_message(self, topic, payload):
+        command_topic = f"{self.mqtt.base_topic}/command/shutdown"
+        if topic == command_topic and payload == "PRESS":
+            self._log("info", "Shutdown command received via MQTT.")
+            self.ipmi.chassis_shutdown()
+
+    def _on_mqtt_connected(self):
+        """Called on every (re)connect: subscriptions and discovery are lost
+        when the broker restarts, so restore them instead of staying silent
+        until the add-on is restarted."""
+        self._log("info", "MQTT connected; subscribing to command topic and re-publishing discovery.")
+        self.mqtt.subscribe(f"{self.mqtt.base_topic}/command/shutdown")
+        self.discovered_sensors.clear()
+
+    def _initialize(self):
+        self._log("info", "Initializing server worker...")
+
+        pid_config = self.config.get('pid_config', {})
+        self.pid.setpoint = pid_config.get('target_temp', 55)
+        self.pid.set_gains(pid_config.get('kp', 4.0), pid_config.get('ki', 0.2), pid_config.get('kd', 0.1))
+
+        if os.path.exists(PID_STATE_FILE):
+            with open(PID_STATE_FILE, 'r') as f:
+                try:
+                    all_states = json.load(f)
+                    if self.alias in all_states:
+                        self.pid.load_state(all_states[self.alias])
+                        self._log("info", f"Loaded persistent PID state: integral={self.pid.integral}")
+                except json.JSONDecodeError:
+                    self._log("warning", "Could not decode PID state file.")
+
+        model_data = self.ipmi.get_server_model_info()
+        if model_data:
+            self.server_info.update(model_data)
+        firmware = self.ipmi.get_firmware_version()
+        if firmware:
+            self.server_info["firmware"] = firmware
+            self._log("info", f"iDRAC firmware version: {firmware}")
+
+        for warning in self.fan_cfg["warnings"]:
+            self._log("warning", warning)
+        self._log("info", f"Fan profile: base {self.fan_cfg['base']}%, high {self.fan_cfg['high']}% at "
+                           f"{self.fan_cfg['low']} C, Dell auto at {self.fan_cfg['critical']} C")
+
+        if self.config.get("disable_pcie_cooling_response") and self.config.get('fan_control_enabled', True):
+            if self.ipmi.set_third_party_pcie_cooling_response(enabled=False):
+                self._pcie_response_disabled = True
+            else:
+                self._log("warning", "This server did not accept the third-party PCIe cooling-response "
+                                     "command; leaving that setting unchanged.")
+
+        self.mqtt.configure_broker(
+            self.global_opts["mqtt_host"], self.global_opts["mqtt_port"],
+            self.global_opts["mqtt_username"], self.global_opts["mqtt_password"],
+            self.log_level,
+        )
+        self.mqtt.set_device_info(
+            server_alias=self.alias,
+            manufacturer=self.server_info.get("manufacturer"),
+            model=self.server_info.get("model"),
+            ip_address=self.config.get("idrac_ip"),
+            serial_number=self.server_info.get("serial"),
+            sw_version=self.server_info.get("firmware"),
+        )
+        self.mqtt.on_connect_callback = self._on_mqtt_connected
+
+        # MQTT being down must not stop IPMI monitoring/control. Try once at
+        # startup, then keep retrying in the background of the control loop.
+        if self.global_opts.get("mqtt_host"):
+            self.mqtt.connect()
+            if not self.mqtt.wait_connected(timeout=3):
+                self._log("warning", "MQTT broker not reachable yet; will keep retrying in the background.")
+        else:
+            self._log("warning", "No MQTT broker configured; Home Assistant entities will not be published.")
+
+        return True
+
+    def run(self):
         try:
-            gen_indicator_digit = int(match.group(2))
-            if gen_indicator_digit >= 4: return True
-        except (IndexError, ValueError): pass
-    return False
+            self._initialize()
+            self._run_loop()
+        finally:
+            # Runs on SIGTERM as well as on an unexpected exception, so the
+            # fans do not stay in manual mode after the add-on stops.
+            self.cleanup()
+            self.alive = False
 
-def celsius_to_fahrenheit(celsius):
-    if celsius is None: return None
-    return round((celsius * 9/5) + 32, 1)
+    def _run_loop(self):
+        while self.running and running:
+            start_time = time.time()
 
-def fahrenheit_to_celsius(fahrenheit):
-    if fahrenheit is None: return None
-    return round((fahrenheit - 32) * 5/9, 1)
+            if (not self.mqtt.is_connected and self.global_opts.get("mqtt_host")
+                    and time.time() >= self._next_mqtt_attempt):
+                self.mqtt.connect()
+                self._next_mqtt_attempt = time.time() + 15
 
-def save_current_status_to_file(status_dict):
-    try:
-        with open(STATUS_FILE, 'w') as f:
-            json.dump(status_dict, f, indent=4)
-    except (IOError, PermissionError) as e:
-        print(f"[ERROR] Could not save status to {STATUS_FILE}: {e}", flush=True)
+            raw_temp_data = self.ipmi.retrieve_temperatures_raw()
+            if raw_temp_data is None:
+                if self.mqtt.is_connected:
+                    self.mqtt.publish(self.mqtt.availability_topic, "offline", retain=True)
+                self._log("warning", "Could not read temperature SDR data; skipping cycle.")
+                self._sleep(60)
+                continue
 
-# --- Main Application Logic ---
-def load_and_configure(mqtt_handler): # Pass mqtt_handler to set device_info
-    global addon_options, app_config, server_info
-    print("[MAIN] Loading configuration and initializing...", flush=True)
+            if self.mqtt.is_connected:
+                self.mqtt.publish(self.mqtt.availability_topic, "online", retain=True)
 
-    addon_options = {
-        "idrac_ip": os.getenv("IDRAC_IP"), "idrac_username": os.getenv("IDRAC_USERNAME"),
-        "idrac_password": os.getenv("IDRAC_PASSWORD"),
-        "check_interval_seconds": int(os.getenv("CHECK_INTERVAL_SECONDS", "60")),
-        "log_level": os.getenv("LOG_LEVEL", "info").lower(),
-        "temperature_unit": os.getenv("TEMPERATURE_UNIT", "C").upper(),
-        "base_fan_speed_percent": int(os.getenv("BASE_FAN_SPEED_PERCENT", "20")),
-        "low_temp_threshold": int(os.getenv("LOW_TEMP_THRESHOLD", "45")),
-        "high_temp_fan_speed_percent": int(os.getenv("HIGH_TEMP_FAN_SPEED_PERCENT", "50")),
-        "critical_temp_threshold": int(os.getenv("CRITICAL_TEMP_THRESHOLD", "65")),
-        "mqtt_host": os.getenv("MQTT_HOST", "core-mosquitto"),
-        "mqtt_port": int(os.getenv("MQTT_PORT", "1883")),
-        "mqtt_username": os.getenv("MQTT_USERNAME", ""),
-        "mqtt_password": os.getenv("MQTT_PASSWORD", "")
-    }
-    log_level = addon_options['log_level']
-    print(f"[{log_level.upper()}] Add-on options loaded: IDRAC_IP={addon_options['idrac_ip']}, LogLevel={log_level}", flush=True)
+            temps = self.ipmi.parse_temperatures(raw_temp_data)
+            fans = self.ipmi.parse_fan_rpms(self.ipmi.retrieve_fan_rpms_raw())
+            power_sdr_data = self.ipmi.retrieve_power_sdr_raw()
+            power = self.ipmi.parse_power_consumption(power_sdr_data)
+            psu_statuses = self.ipmi.get_power_status(power_sdr_data)
 
-    ipmi_manager.configure_ipmi(
-        addon_options["idrac_ip"], addon_options["idrac_username"],
-        addon_options["idrac_password"], log_level=log_level
-    )
+            hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
+            target_fan_speed = "Dell Auto"
 
-    model_data = ipmi_manager.get_server_model_info()
-    if model_data and model_data.get("model") != "Unknown":
-        server_info.update(model_data)
-        server_info["is_gen14_plus"] = determine_server_generation(server_info["model"])
-        print(f"[{log_level.upper()}] Server: {server_info['manufacturer']} {server_info['model']} (Gen14+: {server_info['is_gen14_plus']})", flush=True)
-    else:
-        print(f"[WARNING] Could not determine server model.", flush=True)
-
-    if mqtt_handler: # Configure MQTT client with device info
-        mqtt_handler.configure_broker(
-            addon_options["mqtt_host"], addon_options["mqtt_port"],
-            addon_options["mqtt_username"], addon_options["mqtt_password"],
-            log_level
-        )
-        mqtt_handler.set_device_info(
-            server_info.get("manufacturer"),
-            server_info.get("model"),
-            addon_options.get("idrac_ip")
-        )
-
-    server_info["cpu_generic_temp_pattern"] = r"(?:^Temp$|CPU\s?\d)"
-    server_info["inlet_temp_name_pattern"] = r"^Inlet Temp\b"
-    server_info["exhaust_temp_name_pattern"] = r"^Exhaust Temp\b"
-    print(f"[{log_level.upper()}] Using temp patterns: CPU_generic='{server_info['cpu_generic_temp_pattern']}', Inlet='{server_info['inlet_temp_name_pattern']}', Exhaust='{server_info['exhaust_temp_name_pattern']}'", flush=True)
-
-    app_config = web_server.load_app_config()
-    print(f"[{log_level.upper()}] Loaded app config: {app_config}", flush=True)
-
-    temp_unit = addon_options["temperature_unit"]
-    if temp_unit == "F":
-        addon_options["low_temp_threshold_c"] = fahrenheit_to_celsius(addon_options["low_temp_threshold"])
-        addon_options["critical_temp_threshold_c"] = fahrenheit_to_celsius(addon_options["critical_temp_threshold"])
-        print(f"[{log_level.upper()}] Temp thresholds (F input converted to C): Low={addon_options['low_temp_threshold_c']:.1f}C, Critical={addon_options['critical_temp_threshold_c']:.1f}C", flush=True)
-    else:
-        addon_options["low_temp_threshold_c"] = float(addon_options["low_temp_threshold"])
-        addon_options["critical_temp_threshold_c"] = float(addon_options["critical_temp_threshold"])
-        print(f"[{log_level.upper()}] Temp thresholds (C input): Low={addon_options['low_temp_threshold_c']}C, Critical={addon_options['critical_temp_threshold_c']}C", flush=True)
-
-    if addon_options["critical_temp_threshold_c"] <= addon_options["low_temp_threshold_c"]:
-        addon_options["critical_temp_threshold_c"] = addon_options["low_temp_threshold_c"] + 1
-        print("[WARNING] critical_temp_threshold must be above low_temp_threshold; "
-              f"using {addon_options['critical_temp_threshold_c']}C.", flush=True)
-    addon_options["base_fan_speed_percent"] = max(5, min(100, addon_options["base_fan_speed_percent"]))
-    addon_options["high_temp_fan_speed_percent"] = max(5, min(100, addon_options["high_temp_fan_speed_percent"]))
-    if addon_options["high_temp_fan_speed_percent"] < addon_options["base_fan_speed_percent"]:
-        addon_options["high_temp_fan_speed_percent"] = addon_options["base_fan_speed_percent"]
-        print("[WARNING] high_temp_fan_speed_percent must be at least base_fan_speed_percent; "
-              f"using {addon_options['high_temp_fan_speed_percent']}%.", flush=True)
-
-
-def main_control_loop(mqtt_handler):
-    global running, app_config, addon_options, server_info, loop_count, current_parsed_status
-    global discovered_cpu_sensors, discovered_fan_rpm_sensors # static_sensors_discovered is managed by mqtt_client on_connect
-
-    log_level = addon_options['log_level']
-
-    if not (addon_options["idrac_ip"] and addon_options["idrac_username"] and addon_options["idrac_password"]):
-        # Keep the web UI (and the Supervisor watchdog) alive instead of
-        # exiting in a restart loop; the user can fix the options and restart.
-        print("[ERROR] iDRAC credentials not fully configured. Idling until restarted.", flush=True)
-        while running:
-            time.sleep(1)
-        return
-
-    print(f"[{log_level.upper()}] Entering main control loop. Interval: {addon_options['check_interval_seconds']}s", flush=True)
-
-    while running:
-        start_time = time.time()
-        # Initialize sleep_duration at the start of the loop to a default
-        # This ensures it's always defined before the end-of-loop sleep logic.
-        sleep_duration = float(addon_options["check_interval_seconds"])
-
-
-        try: # Add a try block for the main work of the cycle
-            print(f"[{log_level.upper()}] --- Cycle {loop_count + 1} Start ---", flush=True)
-
-            if loop_count > 0 and loop_count % 5 == 0: # Reload app_config periodically
-                print(f"[{log_level.upper()}] Reloading app config from /data/app_config.json", flush=True)
-                app_config = web_server.load_app_config()
-
-            # --- Retrieve and Parse Temperatures ---
-            raw_temp_sdr_data = ipmi_manager.retrieve_temperatures_raw()
-            parsed_temperatures_c = {"cpu_temps": [], "inlet_temp": None, "exhaust_temp": None}
-            if raw_temp_sdr_data:
-                if log_level in ["trace", "debug"]:
-                    print(f"[{log_level.upper()}] RAW TEMP SDR DATA:\n{raw_temp_sdr_data}\n-------------------------", flush=True)
-                parsed_temperatures_c = ipmi_manager.parse_temperatures(
-                    raw_temp_sdr_data, server_info["cpu_generic_temp_pattern"],
-                    server_info["inlet_temp_name_pattern"], server_info["exhaust_temp_name_pattern"]
-                )
-                print(f"[{log_level.upper()}] Parsed Temperatures (C): {parsed_temperatures_c}", flush=True)
+            if not self.config.get('fan_control_enabled', True):
+                self._log("info", "Fan control is disabled for this server; leaving the iDRAC fan settings untouched.")
+                target_fan_speed = "Monitor only"
+            elif self.ipmi.fan_control_refused:
+                target_fan_speed = "Dell Auto (refused)"
+            elif hottest_cpu is None:
+                self._log("warning", "No CPU temperature sensor found; handing fans back to the iDRAC for safety.")
+                self.ipmi.apply_dell_fan_control_profile()
+                target_fan_speed = "Dell Auto (no CPU sensor)"
             else:
-                print(f"[WARNING] Failed to retrieve temp SDR data.", flush=True)
-
-            # --- Retrieve and Parse Fan RPMs ---
-            raw_fan_sdr_data = ipmi_manager.retrieve_fan_rpms_raw()
-            parsed_fan_rpms = []
-            if raw_fan_sdr_data:
-                if log_level in ["trace", "debug"]:
-                    print(f"[{log_level.upper()}] RAW FAN SDR DATA:\n{raw_fan_sdr_data}\n-------------------------", flush=True)
-                parsed_fan_rpms = ipmi_manager.parse_fan_rpms(raw_fan_sdr_data)
-                print(f"[{log_level.upper()}] Parsed Fan RPMs: {parsed_fan_rpms}", flush=True)
-            else:
-                print(f"[WARNING] Failed to retrieve fan SDR data.", flush=True)
-
-            # --- Retrieve and Parse Power Consumption ---
-            raw_power_sdr_data = ipmi_manager.retrieve_power_sdr_raw()
-            power_consumption_watts = None
-            if raw_power_sdr_data:
-                if log_level in ["trace", "debug"]:
-                    print(f"[{log_level.upper()}] RAW POWER SDR DATA:\n{raw_power_sdr_data}\n-------------------------", flush=True)
-                power_consumption_watts = ipmi_manager.parse_power_consumption(raw_power_sdr_data)
-                print(f"[{log_level.upper()}] Parsed Power Consumption: {power_consumption_watts}W", flush=True)
-            else:
-                print(f"[WARNING] Failed to retrieve power SDR data.", flush=True)
-
-            # --- Dynamic MQTT Discovery (CPUs and Fans) ---
-            if mqtt_handler and mqtt_handler.is_connected:
-                cpu_temps_list_c_current_cycle = parsed_temperatures_c.get("cpu_temps", [])
-                if len(discovered_cpu_sensors) != len(cpu_temps_list_c_current_cycle) or not discovered_cpu_sensors : # Discover if count changed or never discovered
-                    print(f"[{log_level.upper()}] CPU count is {len(cpu_temps_list_c_current_cycle)}. Discovering CPUs.", flush=True)
-                    new_cpu_slugs = set()
-                    for i in range(len(cpu_temps_list_c_current_cycle)):
-                        slug = f"cpu_{i}_temp"
-                        mqtt_handler.publish_sensor_discovery(
-                            sensor_type_slug=slug, sensor_name=f"CPU {i} Temperature",
-                            device_class="temperature", unit_of_measurement="°C",
-                            value_template="{{ value_json.temperature | round(1) }}"
-                        )
-                        new_cpu_slugs.add(slug)
-                    discovered_cpu_sensors = new_cpu_slugs
-
-                for i, fan_info in enumerate(parsed_fan_rpms):
-                    fan_name = fan_info["name"]
-                    safe_fan_name_slug = re.sub(r'[^a-zA-Z0-9_]+', '_', fan_name).lower().strip('_')
-                    if not safe_fan_name_slug: safe_fan_name_slug = f"fan_{i}"
-                    rpm_sensor_slug = f"fan_{safe_fan_name_slug}_rpm"
-                    if rpm_sensor_slug not in discovered_fan_rpm_sensors:
-                        mqtt_handler.publish_sensor_discovery(
-                            sensor_type_slug=rpm_sensor_slug, sensor_name=f"{fan_name} RPM",
-                            unit_of_measurement="RPM", icon="mdi:fan",
-                            value_template="{{ value_json.rpm | round(0) }}"
-                        )
-                        discovered_fan_rpm_sensors.add(rpm_sensor_slug)
-
-            # --- Determine Hottest CPU ---
-            hottest_cpu_temp_c = None
-            cpu_temps_list_c = parsed_temperatures_c.get("cpu_temps", [])
-            if cpu_temps_list_c:
-                hottest_cpu_temp_c = max(cpu_temps_list_c)
-                print(f"[{log_level.upper()}] Hottest CPU Temp: {hottest_cpu_temp_c}°C from {cpu_temps_list_c}", flush=True)
-            else:
-                print(f"[WARNING] No CPU temperatures available for fan control.", flush=True)
-
-            # --- Fan Control Logic ---
-            target_fan_speed_display = "N/A"
-            if ipmi_manager.is_fan_control_refused():
-                target_fan_speed_display = "Dell Auto (refused)"
-            elif hottest_cpu_temp_c is None:
-                print(f"[WARNING] Hottest CPU temp N/A. Applying Dell auto fans for safety.", flush=True)
-                ipmi_manager.apply_dell_fan_control_profile()
-                target_fan_speed_display = "Dell Auto (Safety)"
-            else:
-                low_thresh_c = addon_options["low_temp_threshold_c"]
-                crit_thresh_c = addon_options["critical_temp_threshold_c"]
-                if fan_state.should_use_auto(hottest_cpu_temp_c, crit_thresh_c):
-                    print(f"[{log_level.upper()}] CPU ({hottest_cpu_temp_c}°C) at/above CRITICAL ({crit_thresh_c}°C). Dell auto.", flush=True)
-                    ipmi_manager.apply_dell_fan_control_profile()
-                    target_fan_speed_display = "Dell Auto"
+                crit_thresh = self.fan_cfg["critical"]
+                if self.fan_state.should_use_auto(hottest_cpu, crit_thresh):
+                    self.ipmi.apply_dell_fan_control_profile()
+                    target_fan_speed = "Dell Auto"
                 else:
-                    target_fan_speed_val = fan_state.simple_speed(
-                        hottest_cpu_temp_c, low_thresh_c,
-                        addon_options["base_fan_speed_percent"],
-                        addon_options["high_temp_fan_speed_percent"],
-                    )
-                    print(f"[{log_level.upper()}] CPU ({hottest_cpu_temp_c}°C, low {low_thresh_c}°C). Fan: {target_fan_speed_val}%", flush=True)
-                    if ipmi_manager.apply_user_fan_control_profile(target_fan_speed_val) is None:
-                        target_fan_speed_display = "Dell Auto (fan command failed)"
-                    else:
-                        target_fan_speed_display = target_fan_speed_val
+                    fan_mode = self.config.get('fan_mode', 'simple')
 
-            # --- Update Shared Status File for Web UI ---
-            current_parsed_status_for_file = {
-                "cpu_temps_c": cpu_temps_list_c,
-                "hottest_cpu_temp_c": hottest_cpu_temp_c,
-                "inlet_temp_c": parsed_temperatures_c.get("inlet_temp"),
-                "exhaust_temp_c": parsed_temperatures_c.get("exhaust_temp"),
-                "target_fan_speed_percent": target_fan_speed_display,
-                "actual_fan_rpms": parsed_fan_rpms,
-                "power_consumption_watts": power_consumption_watts,
-                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S %Z")
+                    if fan_mode == 'simple':
+                        low_thresh = self.fan_cfg["low"]
+                        target_fan_speed = self.fan_state.simple_speed(
+                            hottest_cpu,
+                            low_thresh,
+                            self.fan_cfg["base"],
+                            self.fan_cfg["high"],
+                        )
+                        if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
+                            target_fan_speed = "Dell Auto (fan command failed)"
+
+                    elif fan_mode == 'target':
+                        base_fan = self.fan_cfg["base"]
+                        speed = self.pid.update(hottest_cpu, base_fan)
+                        if speed is not None:
+                            target_fan_speed = clamp_speed(speed, minimum=15)
+                            if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
+                                target_fan_speed = "Dell Auto (fan command failed)"
+
+                    elif fan_mode == 'curve':
+                        fan_curve = self.config.get('fan_curve', [])
+                        if len(fan_curve) >= 2:
+                            lower, upper = fan_curve[0], fan_curve[-1]
+                            for i in range(len(fan_curve) - 1):
+                                if fan_curve[i]['temp'] <= hottest_cpu < fan_curve[i + 1]['temp']:
+                                    lower, upper = fan_curve[i], fan_curve[i + 1]
+                                    break
+
+                            if hottest_cpu < lower['temp']:
+                                speed = lower['speed']
+                            elif hottest_cpu >= upper['temp']:
+                                speed = upper['speed']
+                            else:
+                                temp_range = upper['temp'] - lower['temp']
+                                speed_range = upper['speed'] - lower['speed']
+                                speed = (lower['speed'] + ((hottest_cpu - lower['temp']) / temp_range * speed_range)
+                                         if temp_range > 0 else lower['speed'])
+
+                            target_fan_speed = clamp_speed(speed)
+                            if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
+                                target_fan_speed = "Dell Auto (fan command failed)"
+
+            status_data = {
+                "hottest_cpu_temp": hottest_cpu,
+                "inlet_temp": temps.get('inlet_temp'),
+                "exhaust_temp": temps.get('exhaust_temp'),
+                "power": power,
+                "target_fan_speed": None if isinstance(target_fan_speed, str) else target_fan_speed,
+                "cpus": temps.get('cpu_temps', []),
+                "fans": fans,
+                "psus": psu_statuses,
             }
-            save_current_status_to_file(current_parsed_status_for_file)
+            with status_lock:
+                ALL_SERVERS_STATUS[self.alias] = {
+                    "alias": self.alias,
+                    "ip": self.config['idrac_ip'],
+                    "last_updated": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                    "hottest_cpu_temp_c": hottest_cpu,
+                    "inlet_temp_c": temps.get('inlet_temp'),
+                    "exhaust_temp_c": temps.get('exhaust_temp'),
+                    "power_consumption_watts": power,
+                    "target_fan_speed_percent": target_fan_speed,
+                    "cpu_temps_c": temps.get('cpu_temps', []),
+                    "actual_fan_rpms": fans,
+                    "psu_statuses": psu_statuses,
+                }
 
-            # --- MQTT State Publishing ---
-            if mqtt_handler and mqtt_handler.is_connected:
-                # (Keep existing MQTT state publishing logic for temps, target fan speed, hottest cpu, power, fan rpms)
-                # CPU Temps
-                for i, cpu_temp_val in enumerate(cpu_temps_list_c):
-                    mqtt_handler.publish_sensor_state(sensor_type_slug=f"cpu_{i}_temp", value_dict={"temperature": cpu_temp_val})
-                # Inlet/Exhaust
-                if parsed_temperatures_c.get("inlet_temp") is not None:
-                     mqtt_handler.publish_sensor_state(sensor_type_slug="inlet_temp", value_dict={"temperature": parsed_temperatures_c["inlet_temp"]})
-                if parsed_temperatures_c.get("exhaust_temp") is not None:
-                     mqtt_handler.publish_sensor_state(sensor_type_slug="exhaust_temp", value_dict={"temperature": parsed_temperatures_c["exhaust_temp"]})
-                # Hottest CPU
-                if hottest_cpu_temp_c is not None:
-                    mqtt_handler.publish_sensor_state(sensor_type_slug="hottest_cpu_temp", value_dict={"temperature": hottest_cpu_temp_c})
-                # Target Fan Speed
-                if target_fan_speed_display not in ["N/A", "Dell Auto", "Dell Auto (Safety)"]:
-                    try: # Ensure it's an int before publishing if template expects number
-                        mqtt_handler.publish_sensor_state(sensor_type_slug="target_fan_speed", value_dict={"speed": int(target_fan_speed_display)})
-                    except ValueError:
-                        mqtt_handler.publish_sensor_state(sensor_type_slug="target_fan_speed", value_dict={"speed": None}) # Or publish the string "Auto"
+            self._publish_mqtt_data(status_data)
+            self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
+
+    def _sleep(self, seconds):
+        """Sleep in small steps so SIGTERM can run cleanup promptly."""
+        deadline = time.time() + seconds
+        while time.time() < deadline and self.running and running:
+            time.sleep(0.2)
+
+    def _publish_mqtt_data(self, status):
+        if not self.mqtt.is_connected:
+            return
+
+        sensors = {
+            "shutdown_button": {"component": "button", "name": "Shutdown Server", "device_class": "restart", "icon": "mdi:server-off"},
+            "hottest_cpu_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
+            "inlet_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
+            "exhaust_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
+            "power": {"component": "sensor", "device_class": "power", "unit": "W", "state_class": "measurement", "icon": "mdi:flash"},
+            "target_fan_speed": {"component": "sensor", "unit": "%", "icon": "mdi:fan-chevron-up"},
+        }
+        for i, _ in enumerate(status.get('cpus', [])):
+            sensors[f"cpu_{i}_temp"] = {"component": "sensor", "name": f"CPU {i} Temperature", "device_class": "temperature", "unit": "°C", "state_class": "measurement"}
+        for fan in status.get('fans', []):
+            sensors[f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', fan['name']).lower()}_rpm"] = {"component": "sensor", "name": f"{fan['name']} RPM", "unit": "RPM", "icon": "mdi:fan"}
+        for psu in status.get('psus', []):
+            sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem"}
+
+        for slug, desc in sensors.items():
+            if slug not in self.discovered_sensors:
+                cmd_topic = f"{self.mqtt.base_topic}/command/shutdown" if desc['component'] == 'button' else None
+                self.mqtt.publish_discovery(
+                    desc['component'], slug, desc.get('name', slug.replace("_", " ").title()),
+                    desc.get('device_class'), desc.get('unit'), desc.get('icon'),
+                    cmd_topic, None, desc.get('state_class'),
+                )
+                self.discovered_sensors.add(slug)
+
+            if desc['component'] == 'sensor':
+                value = None
+                if slug.startswith('fan_'):
+                    value = next((f['rpm'] for f in status['fans']
+                                  if f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', f['name']).lower()}_rpm" == slug), None)
+                elif slug.startswith('cpu_'):
+                    index = int(slug.split('_')[1])
+                    value = status['cpus'][index] if index < len(status['cpus']) else None
                 else:
-                     mqtt_handler.publish_sensor_state(sensor_type_slug="target_fan_speed", value_dict={"speed": None})
-                # Power Consumption
-                if power_consumption_watts is not None:
-                    mqtt_handler.publish_sensor_state(sensor_type_slug="power_consumption", value_dict={"power": power_consumption_watts})
-                # Actual Fan RPMs
-                for i, fan_info in enumerate(parsed_fan_rpms):
-                    fan_name = fan_info["name"]
-                    safe_fan_name_slug = re.sub(r'[^a-zA-Z0-9_]+', '_', fan_name).lower().strip('_')
-                    if not safe_fan_name_slug: safe_fan_name_slug = f"fan_{i}"
-                    mqtt_handler.publish_sensor_state(sensor_type_slug=f"fan_{safe_fan_name_slug}_rpm", value_dict={"rpm": fan_info["rpm"]})
+                    value = status.get(slug)
+                self.mqtt.publish_state('sensor', slug, value)
+            elif desc['component'] == 'binary_sensor' and slug.startswith('psu_'):
+                psu_name = desc['name']
+                psu_data = next((p for p in status['psus'] if p['name'] == psu_name), None)
+                state = "ON" if psu_data and not psu_data['ok'] else "OFF"
+                self.mqtt.publish_state('binary_sensor', slug, state)
 
-            print(f"[{log_level.upper()}] --- Cycle {loop_count + 1} End ---", flush=True)
+    def cleanup(self):
+        if self.config.get('fan_control_enabled', True):
+            self._log("info", "Worker shutting down. Reverting to Dell auto fans.")
+            self.ipmi.apply_dell_fan_control_profile()
+        else:
+            self._log("info", "Worker shutting down with fan control disabled; leaving iDRAC fan settings untouched.")
 
-        except Exception as cycle_exception: # Catch exceptions within the cycle's work
-            print(f"[ERROR] Unhandled exception within cycle {loop_count + 1}: {cycle_exception}", flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stdout)
-            sys.stdout.flush()
-            # Decide if this error is critical enough to stop the whole add-on, or just skip a cycle
-            # For now, it will just log and proceed to the sleep calculation.
+        if self._pcie_response_disabled:
+            self._log("info", "Restoring Dell default third-party PCIe cooling response.")
+            if not self.ipmi.set_third_party_pcie_cooling_response(enabled=True):
+                self._log("warning", "Could not restore the third-party PCIe cooling response; it is still disabled.")
 
-        # --- Sleep Logic ---
-        # This calculation should now always happen, even if there was an error in the 'try' block above.
-        time_taken = time.time() - start_time
-        sleep_duration = max(0.1, addon_options["check_interval_seconds"] - time_taken)
+        if self.mqtt.is_connected:
+            self.mqtt.disconnect()
 
-        print(f"[{log_level.upper()}] Cycle {loop_count + 1} took {time_taken:.2f}s. Sleeping for {sleep_duration:.2f}s.", flush=True)
-        loop_count += 1
+        if os.path.exists(PID_STATE_FILE):
+            try:
+                with open(PID_STATE_FILE, 'r') as f:
+                    all_states = json.load(f)
+            except (IOError, json.JSONDecodeError):
+                all_states = {}
+        else:
+            all_states = {}
+        all_states[self.alias] = self.pid.get_state()
+        with open(PID_STATE_FILE, 'w') as f:
+            json.dump(all_states, f, indent=4)
+        self._log("info", f"Saved persistent PID state: integral={self.pid.integral}")
 
-        for _ in range(int(sleep_duration / 0.1)): # Check running flag frequently
-            if not running: break
-            time.sleep(0.1)
-        if not running: break
+    def stop(self):
+        self.running = False
 
-# --- Global mqtt_handler_instance ---
-mqtt_handler_instance = None
 
+# --- Main Execution ---
 if __name__ == "__main__":
-    print("[MAIN] ===== HA iDRAC Controller Python Application Starting =====", flush=True)
+    print("[MAIN] ===== HA iDRAC Multi-Server Controller Starting =====", flush=True)
 
-    mqtt_handler_instance = mqtt_client.MqttClient() # Create instance early
+    global_options = {
+        "log_level": os.getenv("LOG_LEVEL", "info"),
+        "check_interval_seconds": int(os.getenv("CHECK_INTERVAL_SECONDS", 60)),
+        "mqtt_host": os.getenv("MQTT_HOST", "core-mosquitto"),
+        "mqtt_port": int(os.getenv("MQTT_PORT", 1883)),
+        "mqtt_username": os.getenv("MQTT_USERNAME", ""),
+        "mqtt_password": os.getenv("MQTT_PASSWORD", ""),
+        "base_fan_speed_percent": int(os.getenv("BASE_FAN_SPEED_PERCENT", 20)),
+        "low_temp_threshold": int(os.getenv("LOW_TEMP_THRESHOLD", 45)),
+        "high_temp_fan_speed_percent": int(os.getenv("HIGH_TEMP_FAN_SPEED_PERCENT", 50)),
+        "critical_temp_threshold": int(os.getenv("CRITICAL_TEMP_THRESHOLD", 65)),
+    }
 
-    load_and_configure(mqtt_handler_instance) # Pass instance to configure it
-
-    if addon_options.get("mqtt_host") and addon_options["mqtt_host"] != "YOUR_MQTT_BROKER_IP_OR_HOSTNAME":
-        # Client ID should be unique, can be based on some config or generated
-        mqtt_handler_instance.client_id = f"ha_idrac_controller_{addon_options.get('idrac_ip','unknown').replace('.','_')}"
-        mqtt_handler_instance.connect()
+    servers_configs_list = []
+    if not os.path.exists("/data/servers_config.json"):
+        with open("/data/servers_config.json", 'w') as f:
+            json.dump([], f)
     else:
-        print("[INFO] MQTT host not configured or is default placeholder. MQTT client will not connect.", flush=True)
-        mqtt_handler_instance = None
+        with open("/data/servers_config.json", 'r') as f:
+            try:
+                servers_configs_list = json.load(f)
+            except json.JSONDecodeError:
+                pass
 
-    web_server_port = 8099
-    web_thread = threading.Thread(target=web_server.run_web_server, args=(web_server_port,), daemon=True)
+    web_server.global_config = global_options
+    web_server_port = int(os.getenv("INGRESS_PORT", 8099))
+    web_thread = threading.Thread(target=web_server.run_web_server, args=(web_server_port, STATUS_FILE, status_lock), daemon=True)
     web_thread.start()
-    print(f"[MAIN] Admin Web Panel server starting in background thread on port {web_server_port}...", flush=True)
+
+    worker_instances = []
+    for server_conf in servers_configs_list:
+        if server_conf.get("enabled", False):
+            worker = ServerWorker(server_conf, global_options)
+            worker_instances.append(worker)
+            thread = threading.Thread(target=worker.run, daemon=True)
+            threads.append(thread)
+            thread.start()
+
+    # Supervisor watchdog endpoint: 503 only if every configured worker has
+    # died, not when the iDRAC/MQTT is merely unreachable (the worker stays
+    # alive and keeps retrying in that case).
+    web_server.set_health_check(lambda: not worker_instances or any(w.alive for w in worker_instances))
 
     try:
-        main_control_loop(mqtt_handler_instance)
-    except Exception as e:
-        print(f"[FATAL] Unhandled exception in main execution: {e}", flush=True)
-        import traceback; traceback.print_exc(file=sys.stdout); sys.stdout.flush()
-    finally:
-        print("[MAIN] Main execution finished. Initiating final cleanup...", flush=True)
-        if addon_options.get("idrac_ip") and ipmi_manager._IPMI_BASE_ARGS:
-            print("[MAIN] Attempting to set fans to Dell default profile...", flush=True)
-            ipmi_manager.apply_dell_fan_control_profile()
-        if mqtt_handler_instance and getattr(mqtt_handler_instance, 'is_connected', False):
-            mqtt_handler_instance.disconnect()
-        print("[MAIN] ===== HA iDRAC Controller Python Application Stopped =====", flush=True)
-        sys.stdout.flush()
+        while running:
+            with status_lock:
+                with open(STATUS_FILE, 'w') as f:
+                    json.dump(list(ALL_SERVERS_STATUS.values()), f, indent=4)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        graceful_shutdown(None, None)
+
+    print("[MAIN] Waiting for all server threads to terminate...", flush=True)
+    for worker in worker_instances:
+        worker.stop()
+    for thread in threads:
+        thread.join(timeout=1)
+    print("[MAIN] ===== HA iDRAC Controller Stopped =====", flush=True)

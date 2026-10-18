@@ -1,8 +1,8 @@
 """Parser tests against output shapes from 12G (iDRAC7) and 13G (iDRAC8) servers."""
 from conftest import load_module
 
-ipmi_mod = load_module("dev_ipmi_manager", "ha-idrac-controller-dev/app/ipmi_manager.py")
-stable_mod = load_module("stable_ipmi_manager", "ha-idrac-controller/app/ipmi_manager.py")
+ipmi_mod = load_module("main_ipmi_manager", "ha-idrac-controller/app/ipmi_manager.py")
+stable_mod = load_module("legacy_ipmi_manager", "ha-idrac-controller-legacy/app/ipmi_manager.py")
 
 # Dell PowerEdge R730/T430 (13th gen, iDRAC8): CPU sensors carry the socket number.
 SDR_13G = """\

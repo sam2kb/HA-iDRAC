@@ -53,7 +53,7 @@
             <br><br>
             <input type="submit" value="Save Settings">
         </form>
-        
+
         <script>
             let pointCounter = {{ fan_curve|length if fan_curve else 1 }};
 
@@ -89,7 +89,7 @@
                 }
                 updateNumFanPoints(); // Or just ensure the backend robustly handles missing indexed fields
             }
-            
+
             function updateNumFanPoints() {
                 // This sends the highest potential index, backend needs to check if fields exist
                 document.getElementById('num_fan_points').value = pointCounter;
