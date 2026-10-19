@@ -1,5 +1,6 @@
 # HA-iDRAC/ha-idrac-controller/app/web_server.py
 from flask import Flask, render_template, request, redirect, flash
+from waitress import serve
 from markupsafe import Markup
 import os
 import json
@@ -200,4 +201,5 @@ def run_web_server(port, status_file_path, lock):
     status_lock = lock
 
     host = '0.0.0.0'
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+    print(f"[WEBSERVER INFO] Serving with waitress on {host}:{port}", flush=True)
+    serve(app, host=host, port=port, threads=4)

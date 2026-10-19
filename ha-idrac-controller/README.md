@@ -1,110 +1,107 @@
-# Home Assistant iDRAC Controller Add-on
+# HA iDRAC Controller
 
 Control one or more Dell PowerEdge servers from Home Assistant over IPMI. The
-add-on reads temperatures, fan speeds, power consumption and PSU status,
-publishes them through MQTT, and manages fan speed per server.
-
-This is the only add-on in the [HA-iDRAC fork](https://github.com/sam2kb/HA-iDRAC).
+app reads temperatures, fan speeds, power consumption and PSU status, publishes
+them through MQTT, and manages fan speed per server.
 
 ## Features
 
-- Multi-server support: monitor and control several PowerEdge servers from one
-  add-on instance.
+- Several servers from one app instance.
 - Per-server fan control with three modes:
     - Simple thresholds: a three-tier system (base, high, critical).
     - Multi-point curve: a custom temperature-to-fan-speed curve.
     - Target temperature: a PID loop that holds a chosen CPU temperature.
-- Server monitoring: each server becomes an MQTT device with sensors for
-  individual CPU temperatures, hottest CPU, inlet and exhaust temperatures, fan
-  RPM, power consumption, target fan speed, PSU status and connectivity.
-- Remote action: a shutdown button for each server.
-- Web UI through ingress: a live dashboard and a Manage Servers page for
-  adding, editing and deleting servers.
+- Monitoring: each server becomes an MQTT device with sensors for individual
+  CPU temperatures, hottest CPU, inlet and exhaust temperatures, fan RPM, power
+  consumption, target fan speed and PSU status.
+- A shutdown button for each server.
+- A web UI through ingress: a live dashboard and a Manage Servers page.
 - MQTT discovery: entities are created automatically.
 
-## Changes in this fork (0.4.0)
+## Fan control safety
 
-The repository now ships a single add-on. The 0.4.0 build includes the 13G
-support and the hardening from the earlier builds:
+CPU temperatures come from the IPMI processor entity (`3.x`), so `CPU1 Temp` on
+13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both work. Inlet and exhaust names are
+anchored, so `PSU1 Inlet Temp` cannot replace the chassis inlet.
 
-CPU temperatures come from the IPMI processor entity (`3.x`), so `CPU1 Temp`
-on 13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both work. Inlet and exhaust names are
-anchored, so `PSU1 Inlet Temp` cannot replace the chassis inlet. Fan control
-has a 2 °C hysteresis band, a 5% floor, and a hand-back to Dell auto when a
-speed write fails. A server that refuses fan control with 0xc1/0xd4/0xd5 is
-detected once, then monitoring continues.
+A 2 °C hysteresis band stops the fans from flapping between speeds, and requests
+below 5% are clamped to 5%. If manual mode is enabled but the speed write fails,
+the fans go back to Dell auto. A server that refuses fan control with
+`0xc1`/`0xd4`/`0xd5` is detected once, then monitoring continues. An optional
+per-server setting disables Dell's third-party PCIe cooling response and
+restores it when the app stops.
 
-MQTT outages no longer stop a worker, passwords go through `ipmitool -E`, and
-the Supervisor watchdog probes `/health`. The MQTT device receives
-`sw_version` and `serial_number` from the server. Contradictory thresholds are
-corrected with a warning, and temperatures outside -20 to 125 °C are ignored.
-
-If you are moving from an older HA-iDRAC build, [MIGRATION.md](../MIGRATION.md)
-lists the differences and the steps.
+MQTT outages do not stop a worker. The app reconnects and republishes discovery.
+The iDRAC password goes through `ipmitool -E`, so it does not appear in the
+process list. The Supervisor watchdog probes `/health`, which fails only when
+every server worker has died. The MQTT device carries the iDRAC firmware version
+and service tag. Contradictory thresholds are corrected with a warning, and
+temperatures outside -20 to 125 °C are ignored.
 
 ## Prerequisites
 
 1.  Dell PowerEdge server with iDRAC 7 or 8. Both the 12th-generation sensor
     naming (`Temp`, iDRAC 7, for example R720) and the 13th-generation naming
     (`CPU1 Temp`/`CPU2 Temp`, iDRAC 8, for example T430, R630 and R730) are
-    supported and covered by unit tests. The original add-on was tested on an
-    R720; 13G hardware verification is still pending, so check the log on first
-    start. On a T430, `ipmitool sdr type temperature` should show
-    `CPU1 Temp`/`CPU2 Temp` on entities `3.1`/`3.2`, plus `Inlet Temp` and
-    `Exhaust Temp` on `7.x`.
+    supported and covered by unit tests. The fan commands were originally
+    verified on an R720; check the log on first start with a different model.
 2.  Network connectivity from Home Assistant to each iDRAC address.
 3.  IPMI over LAN enabled on each iDRAC. In the iDRAC web interface, open iDRAC
     Settings, then Network (or Connectivity), then IPMI Settings. Enable IPMI
     over LAN and set the channel privilege limit to Administrator.
-4.  An MQTT broker that Home Assistant can reach. The `core-mosquitto` add-on is
-    the usual choice.
+4.  An MQTT broker that Home Assistant can reach. The Mosquitto app is the usual
+    choice.
 
 ## Installation
 
-1.  In Home Assistant, open Settings, then Add-ons, then the Add-on Store.
+1.  In Home Assistant, open Settings, then Apps, then Install app.
 2.  Open the three-dot menu and choose Repositories.
 3.  Paste this URL and add it:
 
     ```
-    https://github.com/sam2kb/HA-iDRAC
+    https://github.com/sam2kb/ha-idrac-controller
     ```
 
-4.  Install "HA iDRAC Controller" from the store.
+4.  Install HA iDRAC Controller from the app store.
+
+If you are moving from an older HA-iDRAC app, see
+[MIGRATION.md](../MIGRATION.md).
 
 ## Configuration
 
-Most settings live in the add-on's web UI.
+Most settings live in the app's web UI.
 
-1.  On the add-on page, open the Configuration tab and fill in the MQTT broker
+1.  On the app page, open the Configuration tab and fill in the MQTT broker
     details. The fan speed and temperature values there are global defaults for
     new servers. Save the settings.
-2.  Start the add-on from the Info tab, then click Open Web UI.
+2.  Start the app, then click Open Web UI.
 3.  Open Manage Servers and use the Add New Server form. It is pre-filled with
     the global defaults.
-4.  Restart the add-on after adding or editing servers. The web UI links to the
-    add-on dashboard for this.
+4.  Restart the app after adding or editing servers. The web UI links to the app
+    dashboard for this.
 
 ## Web UI
 
 The dashboard shows live data for every enabled server and refreshes itself.
 The Manage Servers page adds, edits and deletes servers, and sets the fan mode
-and thresholds for each one.
+and thresholds for each one. After saving a server, the page offers a link to
+the app dashboard to restart it.
 
 ## Entities in Home Assistant
 
-Each server becomes a device with these entities:
+Each server becomes a device named `iDRAC (<alias>)` with:
 
-- `button.<alias>_shutdown_server`
-- `binary_sensor.<alias>_status` for online/offline
-- `binary_sensor.<alias>_psu_status` for each power supply
+- a Shutdown Server button
+- a PSU problem sensor for each power supply
 - sensors for CPU temperatures, hottest CPU, inlet, exhaust, fan RPM, power and
   target fan speed
 
-Entity IDs use the alias you give the server.
+Entity IDs derive from the alias and the sensor names. Rename them in Home
+Assistant if you need different IDs.
 
 ## Troubleshooting
 
-- Check the add-on log first. Set the log level to `debug` or `trace` in the
+- Check the app log first. Set the log level to `debug` or `trace` in the
   Configuration tab for more detail.
 - For IPMI errors, confirm that IPMI over LAN is enabled and that the
   credentials in the web UI are correct.
@@ -116,9 +113,10 @@ Entity IDs use the alias you give the server.
 ## Reporting issues
 
 Open an issue at
-[sam2kb/HA-iDRAC](https://github.com/sam2kb/HA-iDRAC/issues) and say which
-add-on and version you are running.
+[sam2kb/ha-idrac-controller](https://github.com/sam2kb/ha-idrac-controller/issues)
+and say which version you are running.
 
 ## License
 
-MIT. Original work by [Aesgarth](https://github.com/Aesgarth/HA-iDRAC).
+MIT. The original work is by
+[Aesgarth](https://github.com/Aesgarth/HA-iDRAC).

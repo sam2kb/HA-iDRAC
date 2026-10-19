@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "[RUN.SH] >>> Add-on execution started at $(date)"
+echo "[RUN.SH] >>> App execution started at $(date)"
 
 # Default values
 #IDRAC_IP_DEFAULT=""

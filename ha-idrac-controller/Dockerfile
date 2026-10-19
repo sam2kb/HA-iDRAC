@@ -1,6 +1,8 @@
-# HA-iDRAC/ha-idrac-controller/Dockerfile
+# HA iDRAC Controller/Dockerfile
 # Use an official Python slim image based on Debian Bookworm
 FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1
 
 # Set the default shell for RUN commands to bash for consistency
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -10,7 +12,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ipmitool \
     bash \
-    jq \  
+    jq \
  && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory

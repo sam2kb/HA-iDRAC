@@ -1,25 +1,43 @@
+## 0.5.0 - 2026-10-18
+
+- Use the Home Assistant term app everywhere. HA renamed add-ons to apps in
+  2026.2.
+- Follow the current app configuration schema: removed the redundant `map`
+  entry (the private `/data` folder is always mounted), the unused
+  `hassio_role`, and the deprecated `build.json`. Added `url`, `timeout: 60`,
+  `services: mqtt:want` and `backup_exclude` for the transient status file.
+- Shutdown now waits up to 50 seconds for the fan hand-back to finish. The app
+  timeout was raised to 60 seconds so the Supervisor does not kill the
+  container in the middle of restoring Dell fan control.
+- The web UI is served by waitress instead of Flask's development server.
+- MQTT discovery now includes an `origin` block, an availability list,
+  suggested display precision, and diagnostic category for PSU sensors. The
+  redundant `json_attributes_topic` was removed.
+- Renamed the repository to `ha-idrac-controller` and repositioned the docs as
+  a standalone app instead of a T430-specific build.
+
 ## 0.4.0 - 2026-10-18
 
-- Removed the legacy single-server add-on. This is now the only add-on in the
+- Removed the legacy single-server app. This is now the only app in the
   repository.
 - Added `MIGRATION.md` for people moving from an older HA-iDRAC build. It maps
   the old settings to the new server form and lists the behaviour changes.
-- No functional changes to the add-on code.
+- No functional changes to the app code.
 
 ## 0.3.0 - 2026-10-18
 
-- Promoted the multi-server build to the main add-on: name "HA iDRAC
+- Promoted the multi-server build to the main app: name "HA iDRAC
   Controller", slug `ha_idrac_controller`, version 0.3.0.
 - Renamed the original single-server build to "HA iDRAC Controller (Legacy)",
   slug `ha_idrac_controller_legacy`, version 0.2.1.
-- No functional changes to either add-on. If you installed the 0.2.0 BETA
-  (`ha_idrac_controller_development`), remove it and install the main add-on.
+- No functional changes to either app. If you installed the 0.2.0 BETA
+  (`ha_idrac_controller_development`), remove it and install the main app.
   Its `/data` volume is tied to the old slug, so the server list does not carry
   over.
 
 ## 0.2.0 - 2026-10-18
 
-First tagged release of the fork. It covers iDRAC 8 (13G) support and the
+First tagged release. It covers iDRAC 8 (13G) support and the
 hardening work from the 0.1.x development builds:
 
 - CPU temperatures are read from the IPMI processor entities (`3.x`), so
