@@ -1,15 +1,18 @@
-# HA-iDRAC/ha-idrac-controller/config.yaml
+# HA iDRAC Controller/config.yaml
 
 name: "HA iDRAC Controller"
-version: "0.4.0" # Incremented version
+version: "0.5.0" # Incremented version
 slug: "ha_idrac_controller"
-description: "Control Dell iDRAC fan speeds and monitor server health in Home Assistant. Multi-server."
+description: "Monitor and control Dell PowerEdge servers through iDRAC over IPMI."
+url: "https://github.com/sam2kb/ha-idrac-controller"
 arch:
   - "aarch64"
   - "amd64"
-init: false
 boot: "auto"
+timeout: 60
 watchdog: "http://[HOST]:[PORT:8099]/health"
+services:
+  - mqtt:want
 
 ingress: true
 ingress_port: 8099
@@ -52,6 +55,5 @@ schema:
   mqtt_username: "str?"
   mqtt_password: "password?"
 
-map:
-  - "data:rw"
-hassio_role: "default"
+backup_exclude:
+  - "current_status.json"

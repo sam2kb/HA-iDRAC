@@ -281,26 +281,33 @@ class ServerWorker:
 
         sensors = {
             "shutdown_button": {"component": "button", "name": "Shutdown Server", "device_class": "restart", "icon": "mdi:server-off"},
-            "hottest_cpu_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
-            "inlet_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
-            "exhaust_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement"},
-            "power": {"component": "sensor", "device_class": "power", "unit": "W", "state_class": "measurement", "icon": "mdi:flash"},
-            "target_fan_speed": {"component": "sensor", "unit": "%", "icon": "mdi:fan-chevron-up"},
+            "hottest_cpu_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
+            "inlet_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
+            "exhaust_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
+            "power": {"component": "sensor", "device_class": "power", "unit": "W", "state_class": "measurement", "icon": "mdi:flash", "suggested_display_precision": 0},
+            "target_fan_speed": {"component": "sensor", "unit": "%", "icon": "mdi:fan-chevron-up", "suggested_display_precision": 0},
         }
         for i, _ in enumerate(status.get('cpus', [])):
-            sensors[f"cpu_{i}_temp"] = {"component": "sensor", "name": f"CPU {i} Temperature", "device_class": "temperature", "unit": "°C", "state_class": "measurement"}
+            sensors[f"cpu_{i}_temp"] = {"component": "sensor", "name": f"CPU {i} Temperature", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1}
         for fan in status.get('fans', []):
-            sensors[f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', fan['name']).lower()}_rpm"] = {"component": "sensor", "name": f"{fan['name']} RPM", "unit": "RPM", "icon": "mdi:fan"}
+            sensors[f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', fan['name']).lower()}_rpm"] = {"component": "sensor", "name": f"{fan['name']} RPM", "unit": "RPM", "icon": "mdi:fan", "suggested_display_precision": 0}
         for psu in status.get('psus', []):
-            sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem"}
+            sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem", "entity_category": "diagnostic"}
 
         for slug, desc in sensors.items():
             if slug not in self.discovered_sensors:
                 cmd_topic = f"{self.mqtt.base_topic}/command/shutdown" if desc['component'] == 'button' else None
                 self.mqtt.publish_discovery(
-                    desc['component'], slug, desc.get('name', slug.replace("_", " ").title()),
-                    desc.get('device_class'), desc.get('unit'), desc.get('icon'),
-                    cmd_topic, None, desc.get('state_class'),
+                    component=desc['component'],
+                    slug=slug,
+                    name=desc.get('name', slug.replace("_", " ").title()),
+                    device_class=desc.get('device_class'),
+                    unit=desc.get('unit'),
+                    icon=desc.get('icon'),
+                    cmd_topic=cmd_topic,
+                    state_class=desc.get('state_class'),
+                    entity_category=desc.get('entity_category'),
+                    suggested_display_precision=desc.get('suggested_display_precision'),
                 )
                 self.discovered_sensors.add(slug)
 
@@ -409,9 +416,12 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         graceful_shutdown(None, None)
 
-    print("[MAIN] Waiting for all server threads to terminate...", flush=True)
+    print("[MAIN] Waiting up to 50s for fan hand-back and cleanup...", flush=True)
     for worker in worker_instances:
         worker.stop()
     for thread in threads:
-        thread.join(timeout=1)
+        thread.join(timeout=50)
+        if thread.is_alive():
+            print("[WARNING] A server worker did not finish cleanup in time; "
+                  "the container is stopping anyway.", flush=True)
     print("[MAIN] ===== HA iDRAC Controller Stopped =====", flush=True)

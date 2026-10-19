@@ -1,4 +1,4 @@
-# HA-iDRAC/repository.yaml
-name: "HA iDRAC Controller (T430/13G fork)"
-url: "https://github.com/sam2kb/HA-iDRAC"
+# HA iDRAC Controller/repository.yaml
+name: "HA iDRAC Controller"
+url: "https://github.com/sam2kb/ha-idrac-controller"
 maintainer: "sam2kb"

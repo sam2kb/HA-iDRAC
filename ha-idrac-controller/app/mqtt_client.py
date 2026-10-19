@@ -135,7 +135,8 @@ class MqttClient:
             return False
 
     def publish_discovery(self, component, slug, name, device_class=None, unit=None, icon=None,
-                          cmd_topic=None, val_template=None, state_class=None):
+                          cmd_topic=None, val_template=None, state_class=None,
+                          entity_category=None, suggested_display_precision=None):
         if not self.device_info_dict:
             return
 
@@ -146,17 +147,24 @@ class MqttClient:
             "name": name,
             "unique_id": unique_id,
             "device": self.device_info_dict,
-            "availability_topic": self.availability_topic,
-            "payload_available": "online",
-            "payload_not_available": "offline",
+            "origin": {
+                "name": "HA iDRAC Controller",
+                "support_url": "https://github.com/sam2kb/ha-idrac-controller",
+            },
+            "availability": [{
+                "topic": self.availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }],
         }
 
         if component == 'sensor':
             payload["state_topic"] = f"{self.base_topic}/sensor/{slug}"
-            payload["json_attributes_topic"] = f"{self.base_topic}/sensor/{slug}"
             payload["value_template"] = "{{ value_json.state }}"
             if state_class:
                 payload["state_class"] = state_class
+            if suggested_display_precision is not None:
+                payload["suggested_display_precision"] = suggested_display_precision
         elif component == 'binary_sensor':
             payload["state_topic"] = f"{self.base_topic}/binary_sensor/{slug}"
             payload["payload_on"] = "ON"
@@ -171,6 +179,8 @@ class MqttClient:
             payload["unit_of_measurement"] = unit
         if icon:
             payload["icon"] = icon
+        if entity_category:
+            payload["entity_category"] = entity_category
 
         self.publish(config_topic, json.dumps(payload), retain=True)
 
