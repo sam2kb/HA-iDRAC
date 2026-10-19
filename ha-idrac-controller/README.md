@@ -4,10 +4,7 @@ Control one or more Dell PowerEdge servers from Home Assistant over IPMI. The
 add-on reads temperatures, fan speeds, power consumption and PSU status,
 publishes them through MQTT, and manages fan speed per server.
 
-This is the main add-on in the [HA-iDRAC fork](https://github.com/sam2kb/HA-iDRAC).
-The original single-server build is still published as
-[HA iDRAC Controller (Legacy)](../ha-idrac-controller-legacy/README.md); it is
-not needed for a T430.
+This is the only add-on in the [HA-iDRAC fork](https://github.com/sam2kb/HA-iDRAC).
 
 ## Features
 
@@ -25,26 +22,25 @@ not needed for a T430.
   adding, editing and deleting servers.
 - MQTT discovery: entities are created automatically.
 
-## Changes in this fork (0.3.0)
+## Changes in this fork (0.4.0)
 
-This release promotes the multi-server build to the main add-on. It now uses
-the `ha_idrac_controller` slug and the plain "HA iDRAC Controller" name. The
-older single-server build moved to `ha_idrac_controller_legacy` and is called
-"HA iDRAC Controller (Legacy)". If you installed the 0.2.0 BETA build, remove
-it and install this one; its `/data` volume is tied to the old slug, so the
-server list does not carry over.
+The repository now ships a single add-on. The 0.4.0 build includes the 13G
+support and the hardening from the earlier builds:
 
-The code is the same as 0.2.0. CPU temperatures come from the IPMI processor
-entity (`3.x`), so `CPU1 Temp` on 13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both
-work. Inlet and exhaust names are anchored, so `PSU1 Inlet Temp` cannot replace
-the chassis inlet. Fan control has a 2 °C hysteresis band, a 5% floor, and a
-hand-back to Dell auto when a speed write fails. A server that refuses fan
-control with 0xc1/0xd4/0xd5 is detected once, then monitoring continues.
+CPU temperatures come from the IPMI processor entity (`3.x`), so `CPU1 Temp`
+on 13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both work. Inlet and exhaust names are
+anchored, so `PSU1 Inlet Temp` cannot replace the chassis inlet. Fan control
+has a 2 °C hysteresis band, a 5% floor, and a hand-back to Dell auto when a
+speed write fails. A server that refuses fan control with 0xc1/0xd4/0xd5 is
+detected once, then monitoring continues.
 
 MQTT outages no longer stop a worker, passwords go through `ipmitool -E`, and
 the Supervisor watchdog probes `/health`. The MQTT device receives
 `sw_version` and `serial_number` from the server. Contradictory thresholds are
 corrected with a warning, and temperatures outside -20 to 125 °C are ignored.
+
+If you are moving from an older HA-iDRAC build, [MIGRATION.md](../MIGRATION.md)
+lists the differences and the steps.
 
 ## Prerequisites
 

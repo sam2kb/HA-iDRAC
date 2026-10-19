@@ -1,3 +1,11 @@
+## 0.4.0 - 2026-10-18
+
+- Removed the legacy single-server add-on. This is now the only add-on in the
+  repository.
+- Added `MIGRATION.md` for people moving from an older HA-iDRAC build. It maps
+  the old settings to the new server form and lists the behaviour changes.
+- No functional changes to the add-on code.
+
 ## 0.3.0 - 2026-10-18
 
 - Promoted the multi-server build to the main add-on: name "HA iDRAC
