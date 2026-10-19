@@ -31,30 +31,25 @@ The operational fixes are less visible but matter on a home network. The main
 add-on retries MQTT instead of stopping a worker when the broker is down, and
 it re-subscribes and republishes discovery after a reconnect. The iDRAC
 password is passed with `ipmitool -E`, so it no longer appears in `ps`. The
-Supervisor watchdog restarts an add-on that exits, and the main add-on serves
+Supervisor watchdog restarts an add-on that exits, and the add-on serves
 `/health`, which fails only when every server worker has died; an unreachable
 iDRAC or broker does not cause a restart loop. Firmware version and service
 tag are read from the server and published as the MQTT device's `sw_version`
 and `serial_number`. Implausible temperatures outside -20 to 125 °C and
 contradictory thresholds are ignored or corrected with a warning.
 
-The stale `multi-server` add-on from upstream was removed; the main add-on
-already supports several servers. The unused `master_encryption_key` option
-was removed too, since no code ever read it. Tests and a GitHub Actions
-workflow cover the SDR parsers and the fan logic.
+The unused `master_encryption_key` option was removed, since no code ever
+read it. Tests and a GitHub Actions workflow cover the SDR parsers and the fan
+logic.
 
-## Add-ons
+## The add-on
 
-1. HA iDRAC Controller (`ha_idrac_controller`, version 0.3.0). The main
-   add-on. Several servers, per-server fan modes (simple, curve, target
-   temperature), monitor-only mode, PSU and connectivity sensors, and a
-   graceful shutdown button. This is the one to install for a T430.
-2. HA iDRAC Controller (Legacy) (`ha_idrac_controller_legacy`, version 0.2.1).
-   The original single-server build, configured from the add-on Configuration
-   tab. Simple three-tier fan control with hysteresis, monitoring and MQTT
-   discovery. It is kept for existing setups and is not needed on a T430.
+HA iDRAC Controller (`ha_idrac_controller`, version 0.4.0) is the only add-on
+in this repository. It supports several servers, per-server fan modes (simple,
+curve, target temperature), monitor-only mode, PSU and connectivity sensors,
+and a graceful shutdown button.
 
-Both add-ons use the same fan commands as the original project:
+It uses the same fan commands as the original project:
 `raw 0x30 0x30 0x01 0x00` for manual mode and `raw 0x30 0x30 0x02 0xff <pct>`
 for the speed. That is the standard 12G/13G Dell sequence. This fork does not
 target iDRAC 9 (14G) or newer; the commands and sensor layout differ there.
@@ -77,14 +72,10 @@ target iDRAC 9 (14G) or newer; the commands and sensor layout differ there.
    the MQTT settings and save. Start the add-on, add the server in the web UI
    under Manage Servers, then restart the add-on once.
 
-Upstream also published a third add-on called `multi-server`, an older
-snapshot of the multi-server code. It is not part of this fork. If you added
-the upstream repository earlier, remove it before adding this one, because both
-repositories use the same add-on slugs.
-
-If you installed the 0.2.0 BETA build (`ha_idrac_controller_development`),
-remove it before installing 0.3.0. The new main add-on uses a different slug,
-so its `/data` volume and server list do not carry over.
+Upstream published two older add-ons under the same slugs. If you added the
+upstream repository earlier, remove it before adding this one. If you are
+coming from the old single-server build or the 0.2.0 BETA, see
+[MIGRATION.md](MIGRATION.md) for the changes and the steps.
 
 ## Configuration notes
 
@@ -92,12 +83,12 @@ so its `/data` volume and server list do not carry over.
   `base_fan_speed_percent: 20`, `low_temp_threshold: 45`,
   `high_temp_fan_speed_percent: 50` and `critical_temp_threshold: 65`, then
   watch the temperatures for a day before lowering anything.
-- The main add-on stores servers in `/data/servers_config.json`, which is
+- The add-on stores servers in `/data/servers_config.json`, which is
   root-only on HA OS, with the iDRAC password in plain text. Do not reuse an
   administrator password from another system.
 - The account needs Administrator privilege. A lower account gets the fan
   commands refused with `0xd4`, and the add-on switches to monitoring only.
-- On stop, the main add-on hands the fans back to Dell's automatic profile. If
+- On stop, the add-on hands the fans back to Dell's automatic profile. If
   the container is killed without running its shutdown handler, the iDRAC can
   stay in manual mode at the last speed. The Supervisor watchdog restarts the
   add-on in that case and the configured profile is applied again.
